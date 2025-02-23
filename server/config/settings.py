@@ -10,7 +10,6 @@ PORT = 65432
 MIN_CREDITS = 10
 MAX_CREDITS = 100
 
-DB_TYPE = 'sqlite'
 DB_FILE = 'game.db'
 DATABASE_URL = f'sqlite:///{DB_FILE}'
 

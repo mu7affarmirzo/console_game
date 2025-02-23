@@ -1,5 +1,5 @@
-from sqlalchemy import Column, Integer, String, ForeignKey
 from sqlalchemy.orm import relationship
+from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, DateTime, Date, func
 
 from server.config.settings import Base, engine, SessionLocal
 
@@ -10,6 +10,19 @@ class Account(Base):
     nickname = Column(String, primary_key=True, index=True)
     credits = Column(Integer, default=0)
     items = relationship("AccountItem", back_populates="account", cascade="all, delete-orphan")
+
+
+class Token(Base):
+    __tablename__ = "tokens"
+
+    id = Column(Integer, primary_key=True, index=True)
+    token = Column(String, unique=True, index=True)
+    account_nickname = Column(String, ForeignKey("accounts.nickname"))
+    created_at = Column(DateTime, server_default=func.now())
+    expires_at = Column(DateTime)
+    is_revoked = Column(Boolean, default=False)
+
+    account = relationship("Account")
 
 
 class ItemMaster(Base):
