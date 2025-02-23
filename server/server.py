@@ -1,100 +1,136 @@
 # server.py
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
 import json
-import socket
-import threading
-import logging
-from server.config import HOST, PORT, SessionLocal
-from server.db.master import DataStore
-from server.db.models.all import init_db
+import random
+from typing import Dict, List, Optional
+import uvicorn
+
+app = FastAPI()
 
 
-# Configure logging.
-logging.basicConfig(level=logging.DEBUG,
-                    format='%(asctime)s [%(levelname)s] %(message)s')
-
-init_db()
-
-
-class RequestHandler:
-    """
-    Routes client requests to the DataStore.
-    """
-
-    def __init__(self, datastore):
-        self.datastore = datastore
-
-    def process(self, request):
-        action = request.get("action")
-        logging.debug(f"Processing action: {action} with request: {request}")
-
-        if action == "login":
-            nickname = request.get("nickname")
-            account = self.datastore.get_account(nickname)
-            if account:
-                account = self.datastore.update_account_on_login(nickname)
-            else:
-                account = self.datastore.create_account(nickname)
-            return {"status": "success",
-                    "account": account,
-                    "items_master": self.datastore.get_items_master()}
-        elif action == "buy":
-            nickname = request.get("nickname")
-            item_key = request.get("item_key")
-            return self.datastore.process_purchase(nickname, item_key)
-        elif action == "sell":
-            nickname = request.get("nickname")
-            item_key = request.get("item_key")
-            return self.datastore.process_sale(nickname, item_key)
-        elif action == "logout":
-            return {"status": "success", "message": "Logged out."}
-        else:
-            logging.warning(f"Unknown action: {action}")
-            return {"status": "error", "message": "Unknown action."}
+# Data Models
+class Item(BaseModel):
+    name: str
+    price: int
 
 
-class GameServer:
-    """
-    Manages network communication. Listens on a TCP socket and spawns a new thread
-    for each client connection.
-    """
+class Player(BaseModel):
+    nickname: str
+    credits: int
+    owned_items: List[str]
 
-    def __init__(self, host, port, datastore):
-        self.host = host
-        self.port = port
-        self.datastore = datastore
-        self.handler = RequestHandler(self.datastore)
 
-    def client_thread(self, conn, addr):
-        logging.info(f"Client connected from {addr}")
-        try:
-            with conn:
-                while True:
-                    data = conn.recv(1024)
-                    if not data:
-                        break
-                    try:
-                        request = json.loads(data.decode())
-                        response = self.handler.process(request)
-                    except Exception as e:
-                        logging.exception("Error processing request.")
-                        response = {"status": "error", "message": str(e)}
-                    conn.sendall(json.dumps(response).encode())
-        except Exception as e:
-            logging.exception(f"Connection error with {addr}")
-        finally:
-            logging.info(f"Connection with {addr} closed.")
+# Game Configuration
+CREDIT_BONUS_RANGE = (100, 1000)  # Random credits given on login
+SAVE_FILE = "game_data.json"
 
-    def start(self):
-        logging.info(f"Starting Game Server on {self.host}:{self.port}")
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind((self.host, self.port))
-            s.listen()
-            while True:
-                conn, addr = s.accept()
-                threading.Thread(target=self.client_thread, args=(conn, addr), daemon=True).start()
+# Game Data
+game_data = {
+    "items": {
+        "laser_sword": {"name": "Laser Sword", "price": 500},
+        "shield_generator": {"name": "Shield Generator", "price": 750},
+        "stealth_device": {"name": "Stealth Device", "price": 1000},
+        "repair_bot": {"name": "Repair Bot", "price": 850},
+        "power_crystal": {"name": "Power Crystal", "price": 300}
+    },
+    "players": {}
+}
+
+
+# Data persistence functions
+def save_game_data():
+    with open(SAVE_FILE, 'w') as f:
+        json.dump(game_data, f)
+
+
+def load_game_data():
+    try:
+        with open(SAVE_FILE, 'r') as f:
+            global game_data
+            game_data = json.load(f)
+    except FileNotFoundError:
+        save_game_data()  # Create initial file if it doesn't exist
+
+
+# Load data on startup
+load_game_data()
+
+
+# API Endpoints
+@app.get("/items")
+async def get_items():
+    """Return all available items in the game."""
+    return game_data["items"]
+
+
+@app.post("/login/{nickname}")
+async def login(nickname: str):
+    """Handle player login, create new account if needed."""
+    if nickname not in game_data["players"]:
+        # Create new player
+        game_data["players"][nickname] = {
+            "nickname": nickname,
+            "credits": 1000,  # Starting credits
+            "owned_items": []
+        }
+        save_game_data()
+
+    # Add random credit bonus
+    bonus = random.randint(CREDIT_BONUS_RANGE[0], CREDIT_BONUS_RANGE[1])
+    game_data["players"][nickname]["credits"] += bonus
+    save_game_data()
+
+    return {
+        "player": game_data["players"][nickname],
+        "bonus_credits": bonus
+    }
+
+
+@app.post("/buy/{nickname}/{item_id}")
+async def buy_item(nickname: str, item_id: str):
+    """Handle item purchase."""
+    if nickname not in game_data["players"]:
+        raise HTTPException(status_code=404, detail="Player not found")
+    if item_id not in game_data["items"]:
+        raise HTTPException(status_code=404, detail="Item not found")
+
+    player = game_data["players"][nickname]
+    item = game_data["items"][item_id]
+
+    if item_id in player["owned_items"]:
+        raise HTTPException(status_code=400, detail="Item already owned")
+    if player["credits"] < item["price"]:
+        raise HTTPException(status_code=400, detail="Insufficient credits")
+
+    player["credits"] -= item["price"]
+    player["owned_items"].append(item_id)
+    save_game_data()
+
+    return player
+
+
+@app.post("/sell/{nickname}/{item_id}")
+async def sell_item(nickname: str, item_id: str):
+    """Handle item sale."""
+    if nickname not in game_data["players"]:
+        raise HTTPException(status_code=404, detail="Player not found")
+    if item_id not in game_data["items"]:
+        raise HTTPException(status_code=404, detail="Item not found")
+
+    player = game_data["players"][nickname]
+    item = game_data["items"][item_id]
+
+    if item_id not in player["owned_items"]:
+        raise HTTPException(status_code=400, detail="Item not owned")
+
+    sell_price = item["price"] // 2  # Sell for half the purchase price
+    player["credits"] += sell_price
+    player["owned_items"].remove(item_id)
+    save_game_data()
+
+    return player
 
 
 if __name__ == "__main__":
-    datastore = DataStore(SessionLocal)
-    server = GameServer(HOST, PORT, datastore)
-    server.start()
+    uvicorn.run(app, host="0.0.0.0", port=8000)
